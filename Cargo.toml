@@ -1,0 +1,32 @@
+[package]
+name = "rsa_inject"
+version = "0.1.0"
+resolver = "2"
+edition = "2021"
+
+[lib]
+name = "rsa_inject"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "injector"
+path = "src/main.rs"
+
+[dependencies]
+libloading = "0.8.0"
+dll-syringe = { version = "0.15.2", default-features = false, features = ["syringe", "rpc-raw"] }
+detour = { version = "0.8.1", default-features = false }
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies.windows]
+version = "0.47.0"
+features = ["Win32_System_LibraryLoader", "Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_Security_Cryptography"]
+
+[profile.release.package."*"]
+opt-level = "z"
+strip = true
+
+[profile.release]
+strip = true
