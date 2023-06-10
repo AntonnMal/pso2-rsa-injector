@@ -1,6 +1,6 @@
 # PSO2 RSA Injector
 
-A "simple" RSA key swapper for PSO2 (tested only on global). This project is a heavily modified version of [cyberkitsune's "PSO2KeyTools"](https://github.com/cyberkitsune/PSO2Proxy/tree/5355aea6edb5342a439642c892369443246c4644/tools).
+A "simple" POC RSA key swapper for PSO2 (tested only on global). This project is a heavily modified version of [cyberkitsune's "PSO2KeyTools"](https://github.com/cyberkitsune/PSO2Proxy/tree/5355aea6edb5342a439642c892369443246c4644/tools).
 
 ## Building
 
