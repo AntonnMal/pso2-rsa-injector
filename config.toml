@@ -1,0 +1,16 @@
+# Filename of the user's public key blob
+user_key = "publicKey.blob"
+# Dump the original keys into files?
+grab_keys = false
+# Enable IP address replacement
+replace_address = true
+
+# You can have multiple of those...
+[[addresses]]
+old = "gs0100.westus2.cloudapp.azure.com"
+new = "example.com"
+
+# ...like this
+[[addresses]]
+old = "gs0200.westus2.cloudapp.azure.com"
+new = "example.com"

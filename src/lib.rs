@@ -1,19 +1,24 @@
 pub(crate) mod process_manip;
 use core::slice;
 use detour::{Function, GenericDetour};
-use process_manip::{ModuleSnapshot, PrintWindowOption, PrintWindowResult, ProcessSnapshot};
+use process_manip::{
+    ModuleSnapshot, PrintWindowOption, PrintWindowResult, ProcessSnapshot,
+};
+use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
+    ffi::CString,
     fs::{self, File},
     io::{self, Read, Write},
     mem,
     path::PathBuf,
-    sync::Mutex,
+    sync::RwLock,
 };
 use windows::{
     core::{PCSTR, PCWSTR},
     Win32::{
         Foundation::{FARPROC, HMODULE, NTSTATUS},
+        Networking::WinSock::ADDRINFOA,
         Security::Cryptography::{
             BCRYPT_ALG_HANDLE, BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, CRYPT_KEY_FLAGS,
         },
@@ -23,39 +28,48 @@ use windows::{
     },
 };
 
-// #[no_mangle]
-// extern "system" fn DllMain(_hinstDLL: HINSTANCE, _fdwReason: u32, _lpvReserved: usize) -> bool {
-//     print_msgbox("hi", "dllmain");
-//     true
-// }
-
-// static one_time: Mutex<bool> = Mutex::new(false);
-
-// #[ctor::ctor]
-// fn test() {
-//     // unsafe {
-//     //     SetTimer(HWND::default(), 0, 0, Some(test_timer))
-//     // };
-//     print_msgbox("hi", "ctor");
-// }
-
-// extern "system" fn test_timer(_par1: HWND, _par2: u32, _par3: usize, _par4: u32) {
-//     let mut one_time_data = one_time.lock().unwrap();
-//     if !*one_time_data {
-//         *one_time_data = true;
-//         print_msgbox("timer", "from timer")
-//     }
-// }
+#[derive(Serialize, Deserialize)]
+struct Settings {
+    user_key: String,
+    grab_keys: bool,
+    replace_address: bool,
+    addresses: Vec<AddrReplace>,
+}
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            grab_keys: true,
+            replace_address: false,
+            user_key: "publicKey.blob".to_string(),
+            addresses: vec![AddrReplace::default()],
+        }
+    }
+}
+#[derive(Serialize, Deserialize)]
+struct AddrReplace {
+    old: String,
+    new: String,
+}
+impl Default for AddrReplace {
+    fn default() -> Self {
+        AddrReplace {
+            old: "old_address".to_string(),
+            new: "new_address".to_string(),
+        }
+    }
+}
 
 static RSAHEADER: [u8; 12] = [
     0x06, 0x02, 0x00, 0x00, 0x00, 0xA4, 0x00, 0x00, 0x52, 0x53, 0x41, 0x31,
 ];
 
-static SEGARSAKEYS: Mutex<Vec<Vec<u8>>> = Mutex::new(vec![]);
-static USERRSAKEYS: Mutex<Vec<u8>> = Mutex::new(vec![]);
+static SEGARSAKEYS: RwLock<Vec<Vec<u8>>> = RwLock::new(vec![]);
+static USERRSAKEYS: RwLock<Vec<u8>> = RwLock::new(vec![]);
+static SETTINGS: RwLock<Option<Settings>> = RwLock::new(None);
 
-static HOOK_OPEN: Mutex<Option<GenericDetour<OpenAlgorithmProviderFn>>> = Mutex::new(None);
-static HOOK_CRYPT_OPEN: Mutex<Option<GenericDetour<CryptImportKeyFn>>> = Mutex::new(None);
+static HOOK_OPEN: RwLock<Option<GenericDetour<OpenAlgorithmProviderFn>>> = RwLock::new(None);
+static HOOK_CRYPT_OPEN: RwLock<Option<GenericDetour<CryptImportKeyFn>>> = RwLock::new(None);
+static HOOK_GETADDRINFO: RwLock<Option<GenericDetour<GetaddrinfoFn>>> = RwLock::new(None);
 
 type OpenAlgorithmProviderFn = extern "system" fn(
     *mut BCRYPT_ALG_HANDLE,
@@ -67,6 +81,8 @@ type OpenAlgorithmProviderFn = extern "system" fn(
 type CryptImportKeyFn =
     extern "system" fn(usize, *const u8, u32, usize, CRYPT_KEY_FLAGS, *mut usize) -> bool;
 
+type GetaddrinfoFn = extern "system" fn(PCSTR, PCSTR, *const ADDRINFOA, *mut *mut ADDRINFOA) -> i32;
+
 #[no_mangle]
 extern "system" fn init() {
     run_init().unwrap_window();
@@ -74,23 +90,55 @@ extern "system" fn init() {
 
 fn run_init() -> Result<(), Box<dyn Error>> {
     unsafe {
-        if let Ok(mut x) = File::open("publicKey.blob") {
-            x.read_to_end(USERRSAKEYS.lock()?.as_mut())?;
+        *SETTINGS.write()? = Some(read_settings());
+        let settings_lock = SETTINGS.read()?;
+        let settings = settings_lock.as_ref().unwrap_window();
+        if !settings.user_key.is_empty() {
+            if let Ok(mut x) = File::open(&settings.user_key) {
+                x.read_to_end(USERRSAKEYS.write()?.as_mut())?;
+                let orig_import: CryptImportKeyFn =
+                    mem::transmute(load_fn("cryptsp.dll", "CryptImportKey")?.unwrap_window());
+                *HOOK_CRYPT_OPEN.write()? = Some(create_hook(orig_import, crypt_open_stub)?);
+            }
         }
-        let orig_import: CryptImportKeyFn =
-            mem::transmute(load_fn("cryptsp.dll", "CryptImportKey")?.unwrap_window());
-        *HOOK_CRYPT_OPEN.lock()? = Some(create_hook(orig_import, crypt_open_stub)?);
+        if settings.replace_address {
+            let orig_getaddrinfo: GetaddrinfoFn =
+                mem::transmute(load_fn("Ws2_32.dll", "getaddrinfo")?.unwrap_window());
+            *HOOK_GETADDRINFO.write()? = Some(create_hook(orig_getaddrinfo, getaddrinfo_stub)?);
+        }
+
         match get_rsa_key()? {
-            Some(x) => *SEGARSAKEYS.lock()? = x,
+            Some(x) => *SEGARSAKEYS.write()? = x,
             None => {
                 let orig_import: OpenAlgorithmProviderFn = mem::transmute(
                     load_fn("bcrypt.dll", "BCryptOpenAlgorithmProvider")?.unwrap_window(),
                 );
-                *HOOK_OPEN.lock()? = Some(create_hook(orig_import, open_stub)?);
+                *HOOK_OPEN.write()? = Some(create_hook(orig_import, open_stub)?);
             }
         }
     }
     Ok(())
+}
+
+fn read_settings() -> Settings {
+    let mut file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open("config.toml")
+        .unwrap_window();
+    let mut toml_string = String::new();
+    file.read_to_string(&mut toml_string).unwrap_window();
+    let settings: Settings = toml::from_str(&toml_string).unwrap_or_default();
+    drop(file);
+    let mut file = File::options()
+        .truncate(true)
+        .write(true)
+        .open("config.toml")
+        .unwrap_window();
+    file.write_all(toml::to_string(&settings).unwrap_window().as_bytes())
+        .unwrap_window();
+    settings
 }
 
 extern "system" fn crypt_open_stub(
@@ -101,11 +149,11 @@ extern "system" fn crypt_open_stub(
     dwflags: CRYPT_KEY_FLAGS,
     phkey: *mut usize,
 ) -> bool {
-    let user_key = USERRSAKEYS.lock().unwrap_window();
+    let user_key = USERRSAKEYS.read().unwrap_window();
     let mut data_location = (pbdata, dwdatalen);
     let orig_key = unsafe { slice::from_raw_parts_mut(pbdata as *mut u8, dwdatalen as usize) };
     if user_key.len() != 0 {
-        for key in SEGARSAKEYS.lock().unwrap_window().iter() {
+        for key in SEGARSAKEYS.read().unwrap_window().iter() {
             if key.len() != dwdatalen as usize {
                 continue;
             }
@@ -118,7 +166,7 @@ extern "system" fn crypt_open_stub(
         }
     }
 
-    let hook_lock = HOOK_CRYPT_OPEN.lock().unwrap_window();
+    let hook_lock = HOOK_CRYPT_OPEN.read().unwrap_window();
     hook_lock.as_ref().unwrap().call(
         hprov,
         data_location.0,
@@ -135,17 +183,40 @@ extern "system" fn open_stub(
     pszimplementation: PCWSTR,
     dwflags: BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS,
 ) -> NTSTATUS {
-    let mut keys = SEGARSAKEYS.lock().unwrap_window();
+    let mut keys = SEGARSAKEYS.write().unwrap_window();
     if keys.len() == 0 {
         if let Some(x) = get_rsa_key().unwrap_window() {
             *keys = x;
         }
     };
-    let hook_lock = HOOK_OPEN.lock().unwrap_window();
+    let hook_lock = HOOK_OPEN.read().unwrap_window();
     hook_lock
         .as_ref()
         .unwrap()
         .call(phalgorithm, pszalgid, pszimplementation, dwflags)
+}
+
+extern "system" fn getaddrinfo_stub(
+    pnodename: PCSTR,
+    pservicename: PCSTR,
+    phints: *const ADDRINFOA,
+    ppresult: *mut *mut ADDRINFOA,
+) -> i32 {
+    let settings_lock = SETTINGS.read().unwrap_window();
+    let settings = settings_lock.as_ref().unwrap_window();
+    let mut addr_in = unsafe { pnodename.to_string().unwrap_window() };
+    for addr in &settings.addresses {
+        if addr_in.contains(&addr.old) {
+            addr_in = addr.new.to_string();
+            break;
+        }
+    }
+    let addr_in = CString::new(addr_in).unwrap_window();
+    let hook_lock = HOOK_GETADDRINFO.read().unwrap_window();
+    hook_lock
+        .as_ref()
+        .unwrap()
+        .call(PCSTR::from_raw(addr_in.as_ptr() as *const u8), pservicename, phints, ppresult)
 }
 
 fn load_fn(dll_name: &str, fn_name: &str) -> Result<FARPROC, io::Error> {
@@ -173,6 +244,8 @@ fn create_hook<T: Function>(orig_fn: T, new_fn: T) -> Result<GenericDetour<T>, B
 }
 
 fn get_rsa_key() -> Result<Option<Vec<Vec<u8>>>, windows::core::Error> {
+    let settings_lock = SETTINGS.read().unwrap_window();
+    let settings = settings_lock.as_ref().unwrap_window();
     let pid = get_process("pso2.exe")?.unwrap();
     let module = if check_ngs() {
         "pso2reboot.dll"
@@ -199,10 +272,12 @@ fn get_rsa_key() -> Result<Option<Vec<Vec<u8>>>, windows::core::Error> {
                 .chain(key_len_buff)
                 .chain(data_iter.by_ref().take((key_len / 8) as usize + 4).copied())
                 .collect();
-            File::create(format!("SEGAKey{key_num}.blob"))
-                .unwrap_window()
-                .write_all(&key)
-                .unwrap_window();
+            if settings.grab_keys {
+                File::create(format!("SEGAKey{key_num}.blob"))
+                    .unwrap_window()
+                    .write_all(&key)
+                    .unwrap_window();
+            }
             key_num += 1;
             keys.push(key.into_iter().collect());
         }
