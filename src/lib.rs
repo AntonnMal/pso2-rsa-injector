@@ -99,7 +99,13 @@ fn run_init() -> Result<(), Box<dyn Error>> {
         let settings_lock = SETTINGS.read()?;
         let settings = settings_lock.as_ref().unwrap_window();
         if !settings.user_key.is_empty() {
-            if let Ok(mut x) = File::open(&settings.user_key) {
+			let key_path = std::path::PathBuf::from(&settings.user_key);
+			let key_path = if key_path.is_absolute() {
+				key_path
+			} else {
+				PATH.read()?.as_ref().unwrap_window().join(key_path)
+			};
+            if let Ok(mut x) = File::open(&key_path) {
                 x.read_to_end(USERRSAKEYS.write()?.as_mut())?;
                 let orig_import: CryptImportKeyFn =
                     mem::transmute(load_fn("cryptsp.dll", "CryptImportKey")?.unwrap_window());
