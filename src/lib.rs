@@ -1,9 +1,7 @@
 pub(crate) mod process_manip;
 use core::slice;
 use detour::{Function, GenericDetour};
-use process_manip::{
-    ModuleSnapshot, PrintWindowOption, PrintWindowResult, ProcessSnapshot,
-};
+use process_manip::{ModuleSnapshot, PrintWindowOption, PrintWindowResult, ProcessSnapshot};
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
@@ -71,6 +69,8 @@ static HOOK_OPEN: RwLock<Option<GenericDetour<OpenAlgorithmProviderFn>>> = RwLoc
 static HOOK_CRYPT_OPEN: RwLock<Option<GenericDetour<CryptImportKeyFn>>> = RwLock::new(None);
 static HOOK_GETADDRINFO: RwLock<Option<GenericDetour<GetaddrinfoFn>>> = RwLock::new(None);
 
+static PATH: RwLock<Option<std::path::PathBuf>> = RwLock::new(None);
+
 type OpenAlgorithmProviderFn = extern "system" fn(
     *mut BCRYPT_ALG_HANDLE,
     PCWSTR,
@@ -90,6 +90,11 @@ extern "system" fn init() {
 
 fn run_init() -> Result<(), Box<dyn Error>> {
     unsafe {
+		if let Some(dir) = get_base_dir("pso2.exe")? {
+			*PATH.write()? = Some(PathBuf::from(dir));
+		} else {
+			*PATH.write()? = Some(PathBuf::new());
+		}
         *SETTINGS.write()? = Some(read_settings());
         let settings_lock = SETTINGS.read()?;
         let settings = settings_lock.as_ref().unwrap_window();
@@ -121,11 +126,12 @@ fn run_init() -> Result<(), Box<dyn Error>> {
 }
 
 fn read_settings() -> Settings {
+	let path = PATH.read().unwrap_window().as_ref().unwrap_window().join("config.toml");
     let mut file = File::options()
         .read(true)
         .write(true)
         .create(true)
-        .open("config.toml")
+        .open(&path)
         .unwrap_window();
     let mut toml_string = String::new();
     file.read_to_string(&mut toml_string).unwrap_window();
@@ -134,7 +140,7 @@ fn read_settings() -> Settings {
     let mut file = File::options()
         .truncate(true)
         .write(true)
-        .open("config.toml")
+        .open(&path)
         .unwrap_window();
     file.write_all(toml::to_string(&settings).unwrap_window().as_bytes())
         .unwrap_window();
@@ -213,10 +219,12 @@ extern "system" fn getaddrinfo_stub(
     }
     let addr_in = CString::new(addr_in).unwrap_window();
     let hook_lock = HOOK_GETADDRINFO.read().unwrap_window();
-    hook_lock
-        .as_ref()
-        .unwrap()
-        .call(PCSTR::from_raw(addr_in.as_ptr() as *const u8), pservicename, phints, ppresult)
+    hook_lock.as_ref().unwrap().call(
+        PCSTR::from_raw(addr_in.as_ptr() as *const u8),
+        pservicename,
+        phints,
+        ppresult,
+    )
 }
 
 fn load_fn(dll_name: &str, fn_name: &str) -> Result<FARPROC, io::Error> {
@@ -273,7 +281,8 @@ fn get_rsa_key() -> Result<Option<Vec<Vec<u8>>>, windows::core::Error> {
                 .chain(data_iter.by_ref().take((key_len / 8) as usize + 4).copied())
                 .collect();
             if settings.grab_keys {
-                File::create(format!("SEGAKey{key_num}.blob"))
+				let path = PATH.read().unwrap_window().as_ref().unwrap_window().join(format!("SEGAKey{key_num}.blob"));
+                File::create(path)
                     .unwrap_window()
                     .write_all(&key)
                     .unwrap_window();
@@ -284,6 +293,19 @@ fn get_rsa_key() -> Result<Option<Vec<Vec<u8>>>, windows::core::Error> {
     }
 
     Ok(Some(keys))
+}
+
+fn get_base_dir(process_name: &str) -> Result<Option<String>, windows::core::Error> {
+	let Some(pid) = get_process(process_name)? else { return Ok(None) };
+	let modules = ModuleSnapshot::new(pid)?;
+	for module in modules {
+        if module.module_name == process_name {
+			let exe_path = std::path::PathBuf::from(module.module_path);
+			let dir = exe_path.parent().unwrap_window().to_string_lossy().to_string();
+            return Ok(Some(dir));
+        }
+    }
+	Ok(None)
 }
 
 fn get_process(process_name: &str) -> Result<Option<u32>, windows::core::Error> {
@@ -307,8 +329,8 @@ fn get_module(pid: u32, module_name: &str) -> Result<Option<&[u8]>, windows::cor
 }
 
 fn check_ngs() -> bool {
-    let mut path = PathBuf::new();
-    match fs::metadata("pso2_bin") {
+    let mut path = PATH.read().unwrap_window().clone().unwrap_window();
+    match fs::metadata(path.join("pso2_bin")) {
         Ok(x) if x.is_dir() => path.push("pso2_bin"),
         Ok(_) | Err(_) => {}
     };

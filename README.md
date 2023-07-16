@@ -20,8 +20,8 @@ cargo build --target x86_64-pc-windows-gnu
 ## Usage
 
 1) Generate a [key pair](https://github.com/cyberkitsune/PSO2Proxy#your-private--public-keypair).
-2) Copy your `publickey.blob` to `pso2_bin` and game root folders.
-3) (Optional) Copy `config.toml` to game root folder and edit it.
+2) Copy your `publickey.blob` to `pso2_bin`.
+3) (Optional) Copy `config.toml` to `pso2_bin` and edit it.
 4) Run `injector.exe`.
 5) Launch the game.
 
