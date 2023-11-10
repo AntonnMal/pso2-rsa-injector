@@ -1,5 +1,6 @@
 # WARNING! Read before downloading
-On 1/11/2023 (6/11/2023 for Steam) Sega will incorporate/have incorporated a new anticheat: Xigncode3 ([source](https://pso2.com/players/news/i_Wellbia_20231026/)). This means that this injector will most likely not work and could get you banned. While they say that you can use GG, this won't last forever.
+
+While this version should work, you might get banned for using it, so **_use at your own risk!_**
 
 # PSO2 RSA Injector
 
@@ -14,7 +15,7 @@ From Windows:
 cargo build
 ```
 
-From Linux:
+From Linux (only for injector and rsa replacer):
 ```
 rustup target add x86_64-pc-windows-gnu # run if the windows toolchain is not installed
 cargo build --target x86_64-pc-windows-gnu
@@ -22,11 +23,20 @@ cargo build --target x86_64-pc-windows-gnu
 
 ## Usage
 
+### For gameguard
 1) Generate a [key pair](https://github.com/cyberkitsune/PSO2Proxy#your-private--public-keypair).
 2) Copy your `publickey.blob` to `pso2_bin`.
 3) (Optional) Copy `config.toml` to `pso2_bin` and edit it.
 4) Run `injector.exe`.
 5) Launch the game.
+
+### For xigncode3
+1) Generate a [key pair](https://github.com/cyberkitsune/PSO2Proxy#your-private--public-keypair).
+2) Copy your `publickey.blob` to `pso2_bin\sub`.
+3) (Optional) Copy `config.toml` to `pso2_bin\sub` and edit it.
+4) Copy `rsa_inject.dll` and `dllhijack.dll` to `pso2_bin\sub`
+5) Rename `dllhijack.dll` to `ddraw.dll`.
+6) Launch the game.
 
 ## Notes
 

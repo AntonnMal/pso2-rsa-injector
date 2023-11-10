@@ -90,21 +90,21 @@ extern "system" fn init() {
 
 fn run_init() -> Result<(), Box<dyn Error>> {
     unsafe {
-		if let Some(dir) = get_base_dir("pso2.exe")? {
-			*PATH.write()? = Some(PathBuf::from(dir));
-		} else {
-			*PATH.write()? = Some(PathBuf::new());
-		}
+        if let Some(dir) = get_base_dir("pso2.exe")? {
+            *PATH.write()? = Some(PathBuf::from(dir));
+        } else {
+            *PATH.write()? = Some(PathBuf::new());
+        }
         *SETTINGS.write()? = Some(read_settings());
         let settings_lock = SETTINGS.read()?;
         let settings = settings_lock.as_ref().unwrap_window();
         if !settings.user_key.is_empty() {
-			let key_path = std::path::PathBuf::from(&settings.user_key);
-			let key_path = if key_path.is_absolute() {
-				key_path
-			} else {
-				PATH.read()?.as_ref().unwrap_window().join(key_path)
-			};
+            let key_path = std::path::PathBuf::from(&settings.user_key);
+            let key_path = if key_path.is_absolute() {
+                key_path
+            } else {
+                PATH.read()?.as_ref().unwrap_window().join(key_path)
+            };
             if let Ok(mut x) = File::open(&key_path) {
                 x.read_to_end(USERRSAKEYS.write()?.as_mut())?;
                 let orig_import: CryptImportKeyFn =
@@ -132,7 +132,12 @@ fn run_init() -> Result<(), Box<dyn Error>> {
 }
 
 fn read_settings() -> Settings {
-	let path = PATH.read().unwrap_window().as_ref().unwrap_window().join("config.toml");
+    let path = PATH
+        .read()
+        .unwrap_window()
+        .as_ref()
+        .unwrap_window()
+        .join("config.toml");
     let mut file = File::options()
         .read(true)
         .write(true)
@@ -266,7 +271,9 @@ fn get_rsa_key() -> Result<Option<Vec<Vec<u8>>>, windows::core::Error> {
     } else {
         "pso2.exe"
     };
-    let Some(data) = get_module(pid, module)? else {return Ok(None)};
+    let Some(data) = get_module(pid, module)? else {
+        return Ok(None);
+    };
     let mut keys: Vec<Vec<u8>> = vec![];
     let mut data_iter = data.iter();
     let mut key_num = 1;
@@ -287,7 +294,12 @@ fn get_rsa_key() -> Result<Option<Vec<Vec<u8>>>, windows::core::Error> {
                 .chain(data_iter.by_ref().take((key_len / 8) as usize + 4).copied())
                 .collect();
             if settings.grab_keys {
-				let path = PATH.read().unwrap_window().as_ref().unwrap_window().join(format!("SEGAKey{key_num}.blob"));
+                let path = PATH
+                    .read()
+                    .unwrap_window()
+                    .as_ref()
+                    .unwrap_window()
+                    .join(format!("SEGAKey{key_num}.blob"));
                 File::create(path)
                     .unwrap_window()
                     .write_all(&key)
@@ -302,16 +314,22 @@ fn get_rsa_key() -> Result<Option<Vec<Vec<u8>>>, windows::core::Error> {
 }
 
 fn get_base_dir(process_name: &str) -> Result<Option<String>, windows::core::Error> {
-	let Some(pid) = get_process(process_name)? else { return Ok(None) };
-	let modules = ModuleSnapshot::new(pid)?;
-	for module in modules {
+    let Some(pid) = get_process(process_name)? else {
+        return Ok(None);
+    };
+    let modules = ModuleSnapshot::new(pid)?;
+    for module in modules {
         if module.module_name == process_name {
-			let exe_path = std::path::PathBuf::from(module.module_path);
-			let dir = exe_path.parent().unwrap_window().to_string_lossy().to_string();
+            let exe_path = std::path::PathBuf::from(module.module_path);
+            let dir = exe_path
+                .parent()
+                .unwrap_window()
+                .to_string_lossy()
+                .to_string();
             return Ok(Some(dir));
         }
     }
-	Ok(None)
+    Ok(None)
 }
 
 fn get_process(process_name: &str) -> Result<Option<u32>, windows::core::Error> {
