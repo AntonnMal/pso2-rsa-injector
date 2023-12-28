@@ -19,6 +19,7 @@ dll-syringe = { version = "0.15.2", default-features = false, features = ["syrin
 detour = { version = "0.8.1", default-features = false }
 toml = "0.7.4"
 serde = { version = "1.0.164", features = ["derive"] }
+rmp-serde = "1.1.2"
 
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

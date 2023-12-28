@@ -9,6 +9,7 @@ use std::{
     fs::{self, File},
     io::{self, Read, Write},
     mem,
+    net::{Ipv4Addr, TcpStream},
     path::PathBuf,
     sync::RwLock,
 };
@@ -16,7 +17,7 @@ use windows::{
     core::{PCSTR, PCWSTR},
     Win32::{
         Foundation::{FARPROC, HMODULE, NTSTATUS},
-        Networking::WinSock::ADDRINFOA,
+        Networking::WinSock::{ADDRINFOA, AF_INET, SOCKADDR, SOCKADDR_IN, SOCKET},
         Security::Cryptography::{
             BCRYPT_ALG_HANDLE, BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, CRYPT_KEY_FLAGS,
         },
@@ -31,6 +32,7 @@ struct Settings {
     user_key: String,
     grab_keys: bool,
     replace_address: bool,
+    auto_key_fetch: bool,
     addresses: Vec<AddrReplace>,
 }
 impl Default for Settings {
@@ -39,6 +41,7 @@ impl Default for Settings {
             grab_keys: true,
             replace_address: false,
             user_key: "publicKey.blob".to_string(),
+            auto_key_fetch: false,
             addresses: vec![AddrReplace::default()],
         }
     }
@@ -57,17 +60,25 @@ impl Default for AddrReplace {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct Keys {
+    ip: Ipv4Addr,
+    key: Vec<u8>,
+}
+
 static RSAHEADER: [u8; 12] = [
     0x06, 0x02, 0x00, 0x00, 0x00, 0xA4, 0x00, 0x00, 0x52, 0x53, 0x41, 0x31,
 ];
 
 static SEGARSAKEYS: RwLock<Vec<Vec<u8>>> = RwLock::new(vec![]);
 static USERRSAKEYS: RwLock<Vec<u8>> = RwLock::new(vec![]);
+static SHIPRSAKEYS: RwLock<Vec<Keys>> = RwLock::new(vec![]);
 static SETTINGS: RwLock<Option<Settings>> = RwLock::new(None);
 
 static HOOK_OPEN: RwLock<Option<GenericDetour<OpenAlgorithmProviderFn>>> = RwLock::new(None);
 static HOOK_CRYPT_OPEN: RwLock<Option<GenericDetour<CryptImportKeyFn>>> = RwLock::new(None);
 static HOOK_GETADDRINFO: RwLock<Option<GenericDetour<GetaddrinfoFn>>> = RwLock::new(None);
+static HOOK_CONNECT: RwLock<Option<GenericDetour<ConnectFn>>> = RwLock::new(None);
 
 static PATH: RwLock<Option<std::path::PathBuf>> = RwLock::new(None);
 
@@ -82,6 +93,8 @@ type CryptImportKeyFn =
     extern "system" fn(usize, *const u8, u32, usize, CRYPT_KEY_FLAGS, *mut usize) -> bool;
 
 type GetaddrinfoFn = extern "system" fn(PCSTR, PCSTR, *const ADDRINFOA, *mut *mut ADDRINFOA) -> i32;
+
+type ConnectFn = extern "system" fn(SOCKET, *const SOCKADDR, i32) -> i32;
 
 #[no_mangle]
 extern "system" fn init() {
@@ -107,15 +120,22 @@ fn run_init() -> Result<(), Box<dyn Error>> {
             };
             if let Ok(mut x) = File::open(&key_path) {
                 x.read_to_end(USERRSAKEYS.write()?.as_mut())?;
-                let orig_import: CryptImportKeyFn =
-                    mem::transmute(load_fn("cryptsp.dll", "CryptImportKey")?.unwrap_window());
-                *HOOK_CRYPT_OPEN.write()? = Some(create_hook(orig_import, crypt_open_stub)?);
             }
+        }
+        if !settings.user_key.is_empty() || settings.auto_key_fetch {
+            let orig_import: CryptImportKeyFn =
+                mem::transmute(load_fn("cryptsp.dll", "CryptImportKey")?.unwrap_window());
+            *HOOK_CRYPT_OPEN.write()? = Some(create_hook(orig_import, crypt_open_stub)?);
         }
         if settings.replace_address {
             let orig_getaddrinfo: GetaddrinfoFn =
                 mem::transmute(load_fn("Ws2_32.dll", "getaddrinfo")?.unwrap_window());
             *HOOK_GETADDRINFO.write()? = Some(create_hook(orig_getaddrinfo, getaddrinfo_stub)?);
+            if settings.auto_key_fetch {
+                let orig_connect: ConnectFn =
+                    mem::transmute(load_fn("Ws2_32.dll", "connect")?.unwrap_window());
+                *HOOK_CONNECT.write()? = Some(create_hook(orig_connect, connect_stub)?);
+            }
         }
 
         match get_rsa_key()? {
@@ -169,7 +189,7 @@ extern "system" fn crypt_open_stub(
     let user_key = USERRSAKEYS.read().unwrap_window();
     let mut data_location = (pbdata, dwdatalen);
     let orig_key = unsafe { slice::from_raw_parts_mut(pbdata as *mut u8, dwdatalen as usize) };
-    if user_key.len() != 0 {
+    if !user_key.is_empty() {
         for key in SEGARSAKEYS.read().unwrap_window().iter() {
             if key.len() != dwdatalen as usize {
                 continue;
@@ -222,11 +242,23 @@ extern "system" fn getaddrinfo_stub(
     let settings_lock = SETTINGS.read().unwrap_window();
     let settings = settings_lock.as_ref().unwrap_window();
     let mut addr_in = unsafe { pnodename.to_string().unwrap_window() };
+    let mut is_changed = false;
     for addr in &settings.addresses {
         if addr_in.contains(&addr.old) {
             addr_in = addr.new.to_string();
+            is_changed = true;
             break;
         }
+    }
+    if settings.auto_key_fetch && is_changed {
+        let mut socket = TcpStream::connect((addr_in.as_str(), 11000)).unwrap_window();
+        let mut len = [0u8; 4];
+        socket.read_exact(&mut len).unwrap_window();
+        let len = u32::from_le_bytes(len);
+        let mut data = vec![0u8; len as usize];
+        socket.read_exact(&mut data).unwrap_window();
+        let keys = rmp_serde::from_slice::<Vec<Keys>>(&data).unwrap_window();
+        *SHIPRSAKEYS.write().unwrap_window() = keys;
     }
     let addr_in = CString::new(addr_in).unwrap_window();
     let hook_lock = HOOK_GETADDRINFO.read().unwrap_window();
@@ -236,6 +268,22 @@ extern "system" fn getaddrinfo_stub(
         phints,
         ppresult,
     )
+}
+
+extern "system" fn connect_stub(s: SOCKET, name: *const SOCKADDR, namelen: i32) -> i32 {
+    let name_deref = unsafe { &*name };
+    if name_deref.sa_family == AF_INET {
+        let name_deref = unsafe { &*(name as *const SOCKADDR_IN) };
+        let ip = unsafe { name_deref.sin_addr.S_un.S_un_b };
+        let ip = Ipv4Addr::new(ip.s_b1, ip.s_b2, ip.s_b3, ip.s_b4);
+        let lock = SHIPRSAKEYS.read().unwrap_window();
+        let key = lock.iter().find(|k| k.ip == ip);
+        if let Some(key) = key {
+            *USERRSAKEYS.write().unwrap_window() = key.key.clone();
+        }
+    }
+    let hook_lock = HOOK_CONNECT.read().unwrap_window();
+    hook_lock.as_ref().unwrap().call(s, name, namelen)
 }
 
 fn load_fn(dll_name: &str, fn_name: &str) -> Result<FARPROC, io::Error> {
