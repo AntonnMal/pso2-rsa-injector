@@ -4,6 +4,8 @@ user_key = "publicKey.blob"
 grab_keys = false
 # Enable IP address replacement
 replace_address = true
+# Enable auto key negotiation (requires `replace_address`)
+auto_key_fetch = true
 
 # You can have multiple of those...
 [[addresses]]
