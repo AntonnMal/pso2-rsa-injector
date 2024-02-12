@@ -6,6 +6,8 @@ grab_keys = false
 replace_address = true
 # Enable auto key negotiation (requires `replace_address`)
 auto_key_fetch = true
+# Fix encryption not being properly setup on wine (only useful to classic)
+classic_wine_fix = false
 
 # You can have multiple of those...
 [[addresses]]

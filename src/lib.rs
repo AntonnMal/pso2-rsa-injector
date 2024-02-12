@@ -1,4 +1,4 @@
-pub(crate) mod process_manip;
+pub mod process_manip;
 use core::slice;
 use detour::{Function, GenericDetour};
 use process_manip::{ModuleSnapshot, PrintWindowOption, PrintWindowResult, ProcessSnapshot};
@@ -11,19 +11,20 @@ use std::{
     mem,
     net::{Ipv4Addr, TcpStream},
     path::PathBuf,
-    sync::RwLock,
+    sync::{Mutex, RwLock},
 };
 use windows::{
     core::{PCSTR, PCWSTR},
     Win32::{
-        Foundation::{FARPROC, HMODULE, NTSTATUS},
+        Foundation::{
+            FreeLibrary, FARPROC, HMODULE, NTSTATUS, STATUS_BUFFER_TOO_SMALL, STATUS_SUCCESS,
+        },
         Networking::WinSock::{ADDRINFOA, AF_INET, SOCKADDR, SOCKADDR_IN, SOCKET},
         Security::Cryptography::{
-            BCRYPT_ALG_HANDLE, BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, CRYPT_KEY_FLAGS,
+            BCRYPT_ALG_HANDLE, BCRYPT_KEY_HANDLE, BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS,
+            CRYPT_KEY_FLAGS,
         },
-        System::LibraryLoader::{
-            GetModuleHandleExW, GetProcAddress, GET_MODULE_HANDLE_EX_FLAG_PIN,
-        },
+        System::LibraryLoader::{GetProcAddress, LoadLibraryW},
     },
 };
 
@@ -34,6 +35,7 @@ struct Settings {
     replace_address: bool,
     auto_key_fetch: bool,
     addresses: Vec<AddrReplace>,
+    classic_wine_fix: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -43,6 +45,7 @@ impl Default for Settings {
             user_key: "publicKey.blob".to_string(),
             auto_key_fetch: false,
             addresses: vec![AddrReplace::default()],
+            classic_wine_fix: false,
         }
     }
 }
@@ -77,16 +80,28 @@ static SETTINGS: RwLock<Option<Settings>> = RwLock::new(None);
 
 static HOOK_OPEN: RwLock<Option<GenericDetour<OpenAlgorithmProviderFn>>> = RwLock::new(None);
 static HOOK_CRYPT_OPEN: RwLock<Option<GenericDetour<CryptImportKeyFn>>> = RwLock::new(None);
+static HOOK_CRYPT_EXPORT: RwLock<Option<GenericDetour<BCryptExportKey>>> = RwLock::new(None);
 static HOOK_GETADDRINFO: RwLock<Option<GenericDetour<GetaddrinfoFn>>> = RwLock::new(None);
 static HOOK_CONNECT: RwLock<Option<GenericDetour<ConnectFn>>> = RwLock::new(None);
 
 static PATH: RwLock<Option<std::path::PathBuf>> = RwLock::new(None);
+static HANDLES: Mutex<Vec<HMODULE>> = Mutex::new(vec![]);
 
 type OpenAlgorithmProviderFn = extern "system" fn(
     *mut BCRYPT_ALG_HANDLE,
     PCWSTR,
     PCWSTR,
     BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS,
+) -> NTSTATUS;
+
+type BCryptExportKey = extern "system" fn(
+    BCRYPT_KEY_HANDLE,
+    BCRYPT_KEY_HANDLE,
+    PCWSTR,
+    *mut u8,
+    u32,
+    *mut u32,
+    u32,
 ) -> NTSTATUS;
 
 type CryptImportKeyFn =
@@ -124,8 +139,13 @@ fn run_init() -> Result<(), Box<dyn Error>> {
         }
         if !settings.user_key.is_empty() || settings.auto_key_fetch {
             let orig_import: CryptImportKeyFn =
-                mem::transmute(load_fn("cryptsp.dll", "CryptImportKey")?.unwrap_window());
+                mem::transmute(load_fn("advapi32.dll", "CryptImportKey")?.unwrap_window());
             *HOOK_CRYPT_OPEN.write()? = Some(create_hook(orig_import, crypt_open_stub)?);
+        }
+        if settings.classic_wine_fix {
+            let orig_import: BCryptExportKey =
+                mem::transmute(load_fn("bcrypt.dll", "BCryptExportKey")?.unwrap_window());
+            *HOOK_CRYPT_EXPORT.write()? = Some(create_hook(orig_import, export_stub)?);
         }
         if settings.replace_address {
             let orig_getaddrinfo: GetaddrinfoFn =
@@ -190,6 +210,14 @@ extern "system" fn crypt_open_stub(
     let mut data_location = (pbdata, dwdatalen);
     let orig_key = unsafe { slice::from_raw_parts_mut(pbdata as *mut u8, dwdatalen as usize) };
     if !user_key.is_empty() {
+        {
+            let mut keys = SEGARSAKEYS.write().unwrap_window();
+            if keys.len() == 0 {
+                if let Some(x) = get_rsa_key().unwrap_window() {
+                    *keys = x;
+                }
+            };
+        }
         for key in SEGARSAKEYS.read().unwrap_window().iter() {
             if key.len() != dwdatalen as usize {
                 continue;
@@ -212,6 +240,31 @@ extern "system" fn crypt_open_stub(
         dwflags,
         phkey,
     )
+}
+
+extern "system" fn export_stub(
+    hkey: BCRYPT_KEY_HANDLE,
+    hexportkey: BCRYPT_KEY_HANDLE,
+    pszblobtype: PCWSTR,
+    pboutput: *mut u8,
+    cboutput: u32,
+    pcbresult: *mut u32,
+    dwflags: u32,
+) -> NTSTATUS {
+    let hook_lock = HOOK_CRYPT_EXPORT.read().unwrap_window();
+    let mut result = hook_lock.as_ref().unwrap().call(
+        hkey,
+        hexportkey,
+        pszblobtype,
+        pboutput,
+        cboutput,
+        pcbresult,
+        dwflags,
+    );
+    if pboutput.is_null() && result == STATUS_BUFFER_TOO_SMALL {
+        result = STATUS_SUCCESS;
+    }
+    result
 }
 
 extern "system" fn open_stub(
@@ -251,14 +304,15 @@ extern "system" fn getaddrinfo_stub(
         }
     }
     if settings.auto_key_fetch && is_changed {
-        let mut socket = TcpStream::connect((addr_in.as_str(), 11000)).unwrap_window();
-        let mut len = [0u8; 4];
-        socket.read_exact(&mut len).unwrap_window();
-        let len = u32::from_le_bytes(len);
-        let mut data = vec![0u8; len as usize];
-        socket.read_exact(&mut data).unwrap_window();
-        let keys = rmp_serde::from_slice::<Vec<Keys>>(&data).unwrap_window();
-        *SHIPRSAKEYS.write().unwrap_window() = keys;
+        if let Ok(mut socket) = TcpStream::connect((addr_in.as_str(), 11000)) {
+            let mut len = [0u8; 4];
+            socket.read_exact(&mut len).unwrap_window();
+            let len = u32::from_le_bytes(len);
+            let mut data = vec![0u8; len as usize];
+            socket.read_exact(&mut data).unwrap_window();
+            let keys = rmp_serde::from_slice::<Vec<Keys>>(&data).unwrap_window();
+            *SHIPRSAKEYS.write().unwrap_window() = keys;
+        }
     }
     let addr_in = CString::new(addr_in).unwrap_window();
     let hook_lock = HOOK_GETADDRINFO.read().unwrap_window();
@@ -291,13 +345,8 @@ fn load_fn(dll_name: &str, fn_name: &str) -> Result<FARPROC, io::Error> {
         let dll_name_u16: Vec<u16> = dll_name.encode_utf16().chain(0..=0).collect();
         let fn_name_u8: Vec<u8> = fn_name.bytes().chain(0..=0).collect();
 
-        let mut handle = HMODULE::default();
-        GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_PIN,
-            PCWSTR::from_raw(dll_name_u16.as_ptr()),
-            std::ptr::addr_of_mut!(handle),
-        )
-        .unwrap();
+        let handle = LoadLibraryW(PCWSTR::from_raw(dll_name_u16.as_ptr()))?;
+        HANDLES.lock().unwrap().push(handle);
         Ok(GetProcAddress(handle, PCSTR::from_raw(fn_name_u8.as_ptr())))
     }
 }
@@ -411,4 +460,12 @@ fn check_ngs() -> bool {
         return true;
     }
     false
+}
+
+#[ctor::dtor]
+fn shutdown() {
+    let mut handles = HANDLES.lock().unwrap();
+    for handle in handles.drain(..) {
+        let _ = unsafe { FreeLibrary(handle) };
+    }
 }

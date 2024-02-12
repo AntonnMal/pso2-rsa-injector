@@ -72,7 +72,8 @@ impl ProcessSnapshot {
                     self.snapshot_handle,
                     std::ptr::addr_of_mut!(self.winapi_module_entry),
                 )
-            } == false
+            }
+            .is_err()
             {
                 self.is_empty = true;
                 return None;
@@ -83,7 +84,8 @@ impl ProcessSnapshot {
                     self.snapshot_handle,
                     std::ptr::addr_of_mut!(self.winapi_module_entry),
                 )
-            } == false
+            }
+            .is_err()
             {
                 self.is_empty = true;
                 return None;
@@ -131,7 +133,8 @@ impl ModuleSnapshot {
                     self.snapshot_handle,
                     std::ptr::addr_of_mut!(self.winapi_module_entry),
                 )
-            } == false
+            }
+            .is_err()
             {
                 self.is_empty = true;
                 return None;
@@ -142,7 +145,8 @@ impl ModuleSnapshot {
                     self.snapshot_handle,
                     std::ptr::addr_of_mut!(self.winapi_module_entry),
                 )
-            } == false
+            }
+            .is_err()
             {
                 self.is_empty = true;
                 return None;
@@ -187,13 +191,13 @@ impl Iterator for ProcessSnapshot {
 
 impl Drop for ModuleSnapshot {
     fn drop(&mut self) {
-        unsafe { CloseHandle(self.snapshot_handle) };
+        let _ = unsafe { CloseHandle(self.snapshot_handle) };
     }
 }
 
 impl Drop for ProcessSnapshot {
     fn drop(&mut self) {
-        unsafe { CloseHandle(self.snapshot_handle) };
+        let _ = unsafe { CloseHandle(self.snapshot_handle) };
     }
 }
 
@@ -223,7 +227,7 @@ pub fn suspend_process(process_id: u32) -> Result<(), Box<dyn std::error::Error>
             lib.get(b"NtSuspendProcess")?;
         let handle = OpenProcess(PROCESS_ALL_ACCESS, false, process_id)?;
         nt_suspend_process(handle);
-        CloseHandle(handle).ok()?;
+        CloseHandle(handle)?;
     }
     Ok(())
 }
@@ -235,7 +239,7 @@ pub fn resume_process(process_id: u32) -> Result<(), Box<dyn std::error::Error>>
             lib.get(b"NtResumeProcess")?;
         let handle = OpenProcess(PROCESS_ALL_ACCESS, false, process_id)?;
         nt_resume_process(handle);
-        CloseHandle(handle).ok()?;
+        CloseHandle(handle)?;
     }
     Ok(())
 }
