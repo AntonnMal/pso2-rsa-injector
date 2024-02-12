@@ -38,4 +38,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: injector.7z
-        path: ./output/injector.7z
+        path: ./injector.7z
