@@ -11,18 +11,15 @@ use std::{
     mem,
     net::{Ipv4Addr, TcpStream},
     path::PathBuf,
-    sync::{Mutex, RwLock},
+    sync::RwLock,
 };
 use windows::{
     core::{PCSTR, PCWSTR},
     Win32::{
-        Foundation::{
-            FreeLibrary, FARPROC, HMODULE, NTSTATUS, STATUS_BUFFER_TOO_SMALL, STATUS_SUCCESS,
-        },
+        Foundation::{FARPROC, NTSTATUS},
         Networking::WinSock::{ADDRINFOA, AF_INET, SOCKADDR, SOCKADDR_IN, SOCKET},
         Security::Cryptography::{
-            BCRYPT_ALG_HANDLE, BCRYPT_KEY_HANDLE, BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS,
-            CRYPT_KEY_FLAGS,
+            BCRYPT_ALG_HANDLE, BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, CRYPT_KEY_FLAGS,
         },
         System::LibraryLoader::{GetProcAddress, LoadLibraryW},
     },
@@ -35,7 +32,6 @@ struct Settings {
     replace_address: bool,
     auto_key_fetch: bool,
     addresses: Vec<AddrReplace>,
-    classic_wine_fix: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -45,7 +41,6 @@ impl Default for Settings {
             user_key: "publicKey.blob".to_string(),
             auto_key_fetch: false,
             addresses: vec![AddrReplace::default()],
-            classic_wine_fix: false,
         }
     }
 }
@@ -80,28 +75,16 @@ static SETTINGS: RwLock<Option<Settings>> = RwLock::new(None);
 
 static HOOK_OPEN: RwLock<Option<GenericDetour<OpenAlgorithmProviderFn>>> = RwLock::new(None);
 static HOOK_CRYPT_OPEN: RwLock<Option<GenericDetour<CryptImportKeyFn>>> = RwLock::new(None);
-static HOOK_CRYPT_EXPORT: RwLock<Option<GenericDetour<BCryptExportKey>>> = RwLock::new(None);
 static HOOK_GETADDRINFO: RwLock<Option<GenericDetour<GetaddrinfoFn>>> = RwLock::new(None);
 static HOOK_CONNECT: RwLock<Option<GenericDetour<ConnectFn>>> = RwLock::new(None);
 
 static PATH: RwLock<Option<std::path::PathBuf>> = RwLock::new(None);
-static HANDLES: Mutex<Vec<HMODULE>> = Mutex::new(vec![]);
 
 type OpenAlgorithmProviderFn = extern "system" fn(
     *mut BCRYPT_ALG_HANDLE,
     PCWSTR,
     PCWSTR,
     BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS,
-) -> NTSTATUS;
-
-type BCryptExportKey = extern "system" fn(
-    BCRYPT_KEY_HANDLE,
-    BCRYPT_KEY_HANDLE,
-    PCWSTR,
-    *mut u8,
-    u32,
-    *mut u32,
-    u32,
 ) -> NTSTATUS;
 
 type CryptImportKeyFn =
@@ -118,6 +101,13 @@ extern "system" fn init() {
 
 fn run_init() -> Result<(), Box<dyn Error>> {
     unsafe {
+        if !check_ngs() {
+            process_manip::print_msgbox(
+                "This DLL is meant for the NGS version of the game",
+                "Invalid version",
+            );
+            return Ok(());
+        }
         if let Some(dir) = get_base_dir("pso2.exe")? {
             *PATH.write()? = Some(PathBuf::from(dir));
         } else {
@@ -141,11 +131,6 @@ fn run_init() -> Result<(), Box<dyn Error>> {
             let orig_import: CryptImportKeyFn =
                 mem::transmute(load_fn("advapi32.dll", "CryptImportKey")?.unwrap_window());
             *HOOK_CRYPT_OPEN.write()? = Some(create_hook(orig_import, crypt_open_stub)?);
-        }
-        if settings.classic_wine_fix {
-            let orig_import: BCryptExportKey =
-                mem::transmute(load_fn("bcrypt.dll", "BCryptExportKey")?.unwrap_window());
-            *HOOK_CRYPT_EXPORT.write()? = Some(create_hook(orig_import, export_stub)?);
         }
         if settings.replace_address {
             let orig_getaddrinfo: GetaddrinfoFn =
@@ -242,31 +227,6 @@ extern "system" fn crypt_open_stub(
     )
 }
 
-extern "system" fn export_stub(
-    hkey: BCRYPT_KEY_HANDLE,
-    hexportkey: BCRYPT_KEY_HANDLE,
-    pszblobtype: PCWSTR,
-    pboutput: *mut u8,
-    cboutput: u32,
-    pcbresult: *mut u32,
-    dwflags: u32,
-) -> NTSTATUS {
-    let hook_lock = HOOK_CRYPT_EXPORT.read().unwrap_window();
-    let mut result = hook_lock.as_ref().unwrap().call(
-        hkey,
-        hexportkey,
-        pszblobtype,
-        pboutput,
-        cboutput,
-        pcbresult,
-        dwflags,
-    );
-    if pboutput.is_null() && result == STATUS_BUFFER_TOO_SMALL {
-        result = STATUS_SUCCESS;
-    }
-    result
-}
-
 extern "system" fn open_stub(
     phalgorithm: *mut BCRYPT_ALG_HANDLE,
     pszalgid: PCWSTR,
@@ -346,7 +306,6 @@ fn load_fn(dll_name: &str, fn_name: &str) -> Result<FARPROC, io::Error> {
         let fn_name_u8: Vec<u8> = fn_name.bytes().chain(0..=0).collect();
 
         let handle = LoadLibraryW(PCWSTR::from_raw(dll_name_u16.as_ptr()))?;
-        HANDLES.lock().unwrap().push(handle);
         Ok(GetProcAddress(handle, PCSTR::from_raw(fn_name_u8.as_ptr())))
     }
 }
@@ -363,12 +322,7 @@ fn get_rsa_key() -> Result<Option<Vec<Vec<u8>>>, windows::core::Error> {
     let settings_lock = SETTINGS.read().unwrap_window();
     let settings = settings_lock.as_ref().unwrap_window();
     let pid = get_process("pso2.exe")?.unwrap();
-    let module = if check_ngs() {
-        "pso2reboot.dll"
-    } else {
-        "pso2.exe"
-    };
-    let Some(data) = get_module(pid, module)? else {
+    let Some(data) = get_module(pid, "pso2reboot.dll")? else {
         return Ok(None);
     };
     let mut keys: Vec<Vec<u8>> = vec![];
@@ -460,12 +414,4 @@ fn check_ngs() -> bool {
         return true;
     }
     false
-}
-
-#[ctor::dtor]
-fn shutdown() {
-    let mut handles = HANDLES.lock().unwrap();
-    for handle in handles.drain(..) {
-        let _ = unsafe { FreeLibrary(handle) };
-    }
 }
