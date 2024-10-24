@@ -101,17 +101,17 @@ extern "system" fn init() {
 
 fn run_init() -> Result<(), Box<dyn Error>> {
     unsafe {
+        if let Some(dir) = get_base_dir("pso2.exe")? {
+            *PATH.write()? = Some(PathBuf::from(dir));
+        } else {
+            *PATH.write()? = Some(PathBuf::new());
+        }
         if !check_ngs() {
             process_manip::print_msgbox(
                 "This DLL is meant for the NGS version of the game",
                 "Invalid version",
             );
             return Ok(());
-        }
-        if let Some(dir) = get_base_dir("pso2.exe")? {
-            *PATH.write()? = Some(PathBuf::from(dir));
-        } else {
-            *PATH.write()? = Some(PathBuf::new());
         }
         *SETTINGS.write()? = Some(read_settings());
         let settings_lock = SETTINGS.read()?;
