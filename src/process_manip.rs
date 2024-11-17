@@ -1,44 +1,35 @@
-use std::{mem::size_of, slice};
-
-use libloading::{Library, Symbol};
+use std::{iter::once, mem::size_of, slice};
 use windows::{
     core::PCWSTR,
     Win32::{
-        Foundation::{CloseHandle, HANDLE, HWND},
-        System::{
-            Diagnostics::ToolHelp::{
-                CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, Process32FirstW,
-                Process32NextW, MODULEENTRY32W, PROCESSENTRY32W, TH32CS_SNAPMODULE,
-                TH32CS_SNAPPROCESS,
-            },
-            Threading::{OpenProcess, PROCESS_ALL_ACCESS},
+        Foundation::{CloseHandle, ERROR_NO_MORE_FILES, HANDLE, HWND},
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, Process32FirstW,
+            Process32NextW, MODULEENTRY32W, PROCESSENTRY32W, TH32CS_SNAPMODULE, TH32CS_SNAPPROCESS,
         },
         UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK},
     },
 };
 
-pub struct ProcessEntry {
-    pub pid: u32,
-    pub threads: u32,
-    pub parrent_pid: u32,
-    pub base_priority: i32,
-    pub process_name: String,
-}
-
+/// Wrapper type around WinApi process snapshots
 pub struct ProcessSnapshot {
     snapshot_handle: HANDLE,
-    winapi_module_entry: PROCESSENTRY32W,
+    winapi_process_entry: PROCESSENTRY32W,
     is_first: bool,
     is_empty: bool,
 }
 
-pub struct ModuleEntry {
-    module_addr: *mut u8,
-    module_size: u32,
-    pub module_name: String,
-    pub module_path: String,
+/// Wrapper type around WinApi `PROCESSENTRY32W`
+///
+/// See more: https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/ns-tlhelp32-processentry32w
+pub struct ProcessEntry {
+    /// Querried process ID
+    pub pid: u32,
+    /// Querried process EXE name
+    pub process_name: String,
 }
 
+/// Wrapper type around WinApi module snapshots
 pub struct ModuleSnapshot {
     snapshot_handle: HANDLE,
     winapi_module_entry: MODULEENTRY32W,
@@ -46,70 +37,101 @@ pub struct ModuleSnapshot {
     is_empty: bool,
 }
 
+/// Wrapper type around WinApi `MODULEENTRY32W`
+///
+/// See more: https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/ns-tlhelp32-moduleentry32w
+pub struct ModuleEntry {
+    /// Address of the module in the context of the owning process
+    module_addr: *mut u8,
+    /// Total module size
+    module_size: u32,
+    /// Module EXE name
+    pub module_name: String,
+    /// Path to module EXE
+    pub module_path: String,
+}
+
+/// Trait for printing `Result::unwrap()` to a message box
+pub trait PrintWindowResult<T, E> {
+    fn unwrap_window(self) -> T
+    where
+        E: std::fmt::Debug;
+}
+
+/// Trait for printing `Option::unwrap()` to a message box
+pub trait PrintWindowOption<T> {
+    fn unwrap_window(self) -> T;
+}
+
 impl ProcessSnapshot {
     pub fn new() -> Result<Self, windows::core::Error> {
+        //SAFETY: this call is safe, because
+        //1) this function takes no pointers
+        //2) this function should be thread safe
         let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }?;
+        // as per winapi convention we need to write the structure size
         let process_entry = PROCESSENTRY32W {
             dwSize: size_of::<PROCESSENTRY32W>() as u32,
             ..Default::default()
         };
         Ok(Self {
             snapshot_handle: snapshot,
-            winapi_module_entry: process_entry,
+            winapi_process_entry: process_entry,
             is_first: true,
             is_empty: false,
         })
     }
 
-    pub fn next(&mut self) -> Option<ProcessEntry> {
+    pub fn next(&mut self) -> Option<Result<ProcessEntry, windows::core::Error>> {
         if self.is_empty {
             return None;
         }
+        let proc_entry_ptr = std::ptr::addr_of_mut!(self.winapi_process_entry);
         if self.is_first {
             self.is_first = false;
-            if unsafe {
-                Process32FirstW(
-                    self.snapshot_handle,
-                    std::ptr::addr_of_mut!(self.winapi_module_entry),
-                )
+            //SAFETY: this call is safe, because
+            //1) proc_entry_ptr points to a valid instance of PROCESSENTRY32W
+            //2) this function should be thread safe
+            match unsafe { Process32FirstW(self.snapshot_handle, proc_entry_ptr) } {
+                Ok(_) => {}
+                Err(e) if e == ERROR_NO_MORE_FILES.into() => {
+                    self.is_empty = true;
+                    return None;
+                }
+                Err(e) => return Some(Err(e)),
             }
-            .is_err()
-            {
-                self.is_empty = true;
-                return None;
-            };
         } else {
-            if unsafe {
-                Process32NextW(
-                    self.snapshot_handle,
-                    std::ptr::addr_of_mut!(self.winapi_module_entry),
-                )
+            //SAFETY: see above
+            match unsafe { Process32NextW(self.snapshot_handle, proc_entry_ptr) } {
+                Ok(_) => {}
+                Err(e) if e == ERROR_NO_MORE_FILES.into() => {
+                    self.is_empty = true;
+                    return None;
+                }
+                Err(e) => return Some(Err(e)),
             }
-            .is_err()
-            {
-                self.is_empty = true;
-                return None;
-            };
         }
-        let mut process_name = match String::from_utf16(&self.winapi_module_entry.szExeFile) {
-            Ok(x) => x,
-            Err(_) => "".to_string(),
-        };
+        let mut process_name =
+            String::from_utf16(&self.winapi_process_entry.szExeFile).unwrap_or_default();
+
+        // remove all null bytes
         process_name.retain(|x| x != '\0');
-        self.winapi_module_entry.szExeFile.fill(0);
-        Some(ProcessEntry {
-            pid: self.winapi_module_entry.th32ProcessID,
-            threads: self.winapi_module_entry.cntThreads,
-            parrent_pid: self.winapi_module_entry.th32ParentProcessID,
-            base_priority: self.winapi_module_entry.pcPriClassBase,
+        // clear process name for next iteration
+        self.winapi_process_entry.szExeFile.fill(0);
+        Some(Ok(ProcessEntry {
+            pid: self.winapi_process_entry.th32ProcessID,
             process_name,
-        })
+        }))
     }
 }
 
 impl ModuleSnapshot {
     pub fn new(pid: u32) -> Result<Self, windows::core::Error> {
+        //SAFETY: this call is safe, because
+        //1) this function takes no pointers
+        //2) this function should be thread safe
         let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid) }?;
+        // as per winapi convention we need to write the structure size
         let module_entry = MODULEENTRY32W {
             dwSize: size_of::<MODULEENTRY32W>() as u32,
             ..Default::default()
@@ -122,76 +144,81 @@ impl ModuleSnapshot {
         })
     }
 
-    pub fn next(&mut self) -> Option<ModuleEntry> {
+    pub fn next(&mut self) -> Option<Result<ModuleEntry, windows::core::Error>> {
         if self.is_empty {
             return None;
         }
+        let mod_entry_ptr = std::ptr::addr_of_mut!(self.winapi_module_entry);
         if self.is_first {
             self.is_first = false;
-            if unsafe {
-                Module32FirstW(
-                    self.snapshot_handle,
-                    std::ptr::addr_of_mut!(self.winapi_module_entry),
-                )
+            //SAFETY: this call is safe, because
+            //1) mod_entry_ptr points to a valid instance of MODULEENTRY32W
+            //2) this function should be thread safe
+            match unsafe { Module32FirstW(self.snapshot_handle, mod_entry_ptr) } {
+                Ok(_) => {}
+                Err(e) if e == ERROR_NO_MORE_FILES.into() => {
+                    self.is_empty = true;
+                    return None;
+                }
+                Err(e) => return Some(Err(e)),
             }
-            .is_err()
-            {
-                self.is_empty = true;
-                return None;
-            };
         } else {
-            if unsafe {
-                Module32NextW(
-                    self.snapshot_handle,
-                    std::ptr::addr_of_mut!(self.winapi_module_entry),
-                )
+            //SAFETY: this call is safe, because
+            //1) mod_entry_ptr points to a valid instance of MODULEENTRY32W
+            //2) this function should be thread safe
+            match unsafe { Module32NextW(self.snapshot_handle, mod_entry_ptr) } {
+                Ok(_) => {}
+                Err(e) if e == ERROR_NO_MORE_FILES.into() => {
+                    self.is_empty = true;
+                    return None;
+                }
+                Err(e) => return Some(Err(e)),
             }
-            .is_err()
-            {
-                self.is_empty = true;
-                return None;
-            };
         }
-        let mut module_name = match String::from_utf16(&self.winapi_module_entry.szModule) {
-            Ok(x) => x,
-            Err(_) => "".to_string(),
-        };
+        let mut module_name =
+            String::from_utf16(&self.winapi_module_entry.szModule).unwrap_or_default();
+        let mut module_path =
+            String::from_utf16(&self.winapi_module_entry.szExePath).unwrap_or_default();
+        // remove all null bytes
         module_name.retain(|x| x != '\0');
-        self.winapi_module_entry.szModule.fill(0);
-        let mut module_path = match String::from_utf16(&self.winapi_module_entry.szExePath) {
-            Ok(x) => x,
-            Err(_) => "".to_string(),
-        };
         module_path.retain(|x| x != '\0');
+        // clear strings for next iteration
+        self.winapi_module_entry.szModule.fill(0);
         self.winapi_module_entry.szExePath.fill(0);
-        Some(ModuleEntry {
+        Some(Ok(ModuleEntry {
             module_addr: self.winapi_module_entry.modBaseAddr,
             module_size: self.winapi_module_entry.modBaseSize,
             module_name,
             module_path,
-        })
+        }))
     }
 }
 
-impl Iterator for ModuleSnapshot {
-    type Item = ModuleEntry;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.next()
+impl ModuleEntry {
+    /// Returns a view of module memory
+    ///
+    /// SAFETY:
+    /// 1) module entry must point to valid module
+    /// 2) caller must have read access to module memory
+    /// 3) memory reference MUST NOT outlive the module lifetime
+    pub unsafe fn get_memory(&self) -> &'static [u8] {
+        slice::from_raw_parts(self.module_addr, self.module_size as usize)
     }
 }
 
 impl Iterator for ProcessSnapshot {
-    type Item = ProcessEntry;
+    type Item = Result<ProcessEntry, windows::core::Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next()
     }
 }
 
-impl Drop for ModuleSnapshot {
-    fn drop(&mut self) {
-        let _ = unsafe { CloseHandle(self.snapshot_handle) };
+impl Iterator for ModuleSnapshot {
+    type Item = Result<ModuleEntry, windows::core::Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next()
     }
 }
 
@@ -201,15 +228,16 @@ impl Drop for ProcessSnapshot {
     }
 }
 
-impl ModuleEntry {
-    pub unsafe fn get_memory(&self) -> &'static [u8] {
-        slice::from_raw_parts(self.module_addr, self.module_size as usize)
+impl Drop for ModuleSnapshot {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.snapshot_handle) };
     }
 }
 
 pub fn print_msgbox(msg: &str, header: &str) {
-    let msg_u16_str: Vec<u16> = msg.encode_utf16().chain(0..=0).collect();
-    let header_u16_str: Vec<u16> = header.encode_utf16().chain(0..=0).collect();
+    let msg_u16_str: Vec<u16> = msg.encode_utf16().chain(once(0)).collect();
+    let header_u16_str: Vec<u16> = header.encode_utf16().chain(once(0)).collect();
+    //SAFETY: message and header pointers point to a valid UTF16 strings
     unsafe {
         MessageBoxW(
             HWND::default(),
@@ -218,36 +246,6 @@ pub fn print_msgbox(msg: &str, header: &str) {
             MB_OK | MB_ICONERROR,
         )
     };
-}
-
-pub fn suspend_process(process_id: u32) -> Result<(), Box<dyn std::error::Error>> {
-    unsafe {
-        let lib = Library::new("ntdll.dll")?;
-        let nt_suspend_process: Symbol<unsafe extern "C" fn(HANDLE) -> u32> =
-            lib.get(b"NtSuspendProcess")?;
-        let handle = OpenProcess(PROCESS_ALL_ACCESS, false, process_id)?;
-        nt_suspend_process(handle);
-        CloseHandle(handle)?;
-    }
-    Ok(())
-}
-
-pub fn resume_process(process_id: u32) -> Result<(), Box<dyn std::error::Error>> {
-    unsafe {
-        let lib = Library::new("ntdll.dll")?;
-        let nt_resume_process: Symbol<unsafe extern "C" fn(HANDLE) -> u32> =
-            lib.get(b"NtResumeProcess")?;
-        let handle = OpenProcess(PROCESS_ALL_ACCESS, false, process_id)?;
-        nt_resume_process(handle);
-        CloseHandle(handle)?;
-    }
-    Ok(())
-}
-
-pub trait PrintWindowResult<T, E> {
-    fn unwrap_window(self) -> T
-    where
-        E: std::fmt::Debug;
 }
 
 impl<T, E> PrintWindowResult<T, E> for Result<T, E> {
@@ -272,10 +270,6 @@ impl<T, E> PrintWindowResult<T, E> for Result<T, E> {
             }
         }
     }
-}
-
-pub trait PrintWindowOption<T> {
-    fn unwrap_window(self) -> T;
 }
 
 impl<T> PrintWindowOption<T> for Option<T> {

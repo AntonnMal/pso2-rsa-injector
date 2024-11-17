@@ -14,9 +14,9 @@ libloading = "0.8.5"
 dll-syringe = { version = "0.15.2", default-features = false, features = ["syringe", "rpc-raw"] }
 detour = { version = "0.8.1", default-features = false }
 toml = "0.8.19"
-serde = { version = "1.0.210", features = ["derive"] }
+serde = { version = "1.0.215", features = ["derive"] }
 rmp-serde = "1.3.0"
-ctor = "0.2.8"
+parking_lot = "0.12.3"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
