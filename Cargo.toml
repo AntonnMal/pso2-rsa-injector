@@ -30,3 +30,6 @@ strip = true
 
 [profile.release]
 strip = true
+
+[patch.crates-io]
+dll-syringe = { git = "https://github.com/AntonnMal/dll-syringe" }

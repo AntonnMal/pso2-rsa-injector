@@ -248,7 +248,7 @@ extern "system" fn crypt_open_stub(
         let orig_key = unsafe { slice::from_raw_parts(pbdata, dwdatalen as usize) };
         {
             let mut keys = SEGA_RSA_KEYS.write();
-            if keys.len() == 0 {
+            if keys.is_empty() {
                 if let Some(x) = get_rsa_key().unwrap_window() {
                     *keys = x;
                 }

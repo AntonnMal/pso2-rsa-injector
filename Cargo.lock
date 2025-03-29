@@ -82,8 +82,7 @@ dependencies = [
 [[package]]
 name = "dll-syringe"
 version = "0.15.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdc807201d54de75e9bd7ad199d0031048625059f84acfc94506bdb13c0b4f59"
+source = "git+https://github.com/AntonnMal/dll-syringe#23f6e0ee97f1bf9779674992518560a3e2dd0db9"
 dependencies = [
  "cstr",
  "iced-x86",
