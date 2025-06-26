@@ -11,7 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 libloading = "0.8.5"
-dll-syringe = { version = "0.15.2", default-features = false, features = ["syringe", "rpc-raw"] }
+dll-syringe = { version = "0.16.0", default-features = false, features = ["syringe", "rpc-raw"] }
 detour = { version = "0.8.1", default-features = false }
 toml = "0.8.19"
 serde = { version = "1.0.215", features = ["derive"] }
@@ -30,6 +30,3 @@ strip = true
 
 [profile.release]
 strip = true
-
-[patch.crates-io]
-dll-syringe = { git = "https://github.com/AntonnMal/dll-syringe" }
